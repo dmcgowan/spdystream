@@ -33,9 +33,6 @@ type Stream struct {
 	replyCond  *sync.Cond
 	replied    bool
 	closeChan  chan bool
-
-	shutdownLock sync.Mutex
-	shutdownChan chan struct{} // closed when Reset is called (no more R/W).
 }
 
 // WriteData writes data to stream, sending a dataframe per call
@@ -170,16 +167,6 @@ func (s *Stream) Close() error {
 func (s *Stream) Reset() error {
 	s.conn.removeStream(s)
 
-	// only close it once.
-	s.shutdownLock.Lock()
-	select {
-	case <-s.shutdownChan:
-		// already was closed.
-	default:
-		close(s.shutdownChan)
-	}
-	s.shutdownLock.Unlock()
-
 	s.finishLock.Lock()
 	if s.finished {
 		s.finishLock.Unlock()
@@ -188,14 +175,11 @@ func (s *Stream) Reset() error {
 	s.finished = true
 	s.finishLock.Unlock()
 
+	close(s.closeChan)
+
+	// Ensure no frame handlers are attempting to send data
 	s.dataLock.Lock()
-	select {
-	case <-s.closeChan:
-		break
-	default:
-		close(s.dataChan)
-		close(s.closeChan)
-	}
+	close(s.dataChan)
 	s.dataLock.Unlock()
 
 	resetFrame := &spdy.RstStreamFrame{
